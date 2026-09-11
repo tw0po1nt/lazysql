@@ -66,7 +66,7 @@ func TestMSSQL_GetPrimaryKeyColumnNames(t *testing.T) {
 	}
 	defer db.Close()
 
-	pg := &MSSQL{Connection: db}
+	pg := &MSSQL{Connection: db, currentDatabase: DBNameMSSQL}
 
 	rows := sqlmock.NewRows([]string{"column_name"}).
 		AddRow("id")
@@ -75,7 +75,7 @@ func TestMSSQL_GetPrimaryKeyColumnNames(t *testing.T) {
 
 	mock.ExpectQuery("SELECT SCHEMA_NAME() AS CurrentSchema").WillReturnRows(schemaRow)
 
-	// Match exact query structure with schema (no USE prefix — the
+	// Match exact query structure with schema (no USE prefix, since the
 	// connection is already scoped to the target database)
 	mock.ExpectQuery(`SELECT
 			c.name AS column_name
@@ -126,7 +126,7 @@ func TestMSSQL_GetForeignKeys(t *testing.T) {
 	}
 	defer db.Close()
 
-	pg := &MSSQL{Connection: db}
+	pg := &MSSQL{Connection: db, currentDatabase: DBNameMSSQL}
 
 	// Match actual MSSQL sys table columns
 	rows := sqlmock.NewRows([]string{
@@ -263,7 +263,7 @@ func TestMSSQL_GetIndexes(t *testing.T) {
 	}
 	defer db.Close()
 
-	pg := &MSSQL{Connection: db}
+	pg := &MSSQL{Connection: db, currentDatabase: DBNameMSSQL}
 
 	// Match actual columns from sys.indexes query
 	rows := sqlmock.NewRows([]string{
@@ -360,7 +360,7 @@ func TestMSSQL_ExecutePendingChanges(t *testing.T) {
 	}
 	defer db.Close()
 
-	pg := &MSSQL{Connection: db}
+	pg := &MSSQL{Connection: db, currentDatabase: DBNameMSSQL}
 
 	changes := []models.DBDMLChange{
 		{
@@ -399,7 +399,7 @@ func TestMSSQL_GetTableColumns(t *testing.T) {
 	}
 	defer db.Close()
 
-	pg := &MSSQL{Connection: db}
+	pg := &MSSQL{Connection: db, currentDatabase: DBNameMSSQL}
 
 	// Mock the expected query with all 5 columns including the new "comment" column
 	rows := sqlmock.NewRows([]string{
@@ -476,7 +476,7 @@ func TestMSSQL_GetRecords(t *testing.T) {
 	}
 	defer db.Close()
 
-	pg := &MSSQL{Connection: db}
+	pg := &MSSQL{Connection: db, currentDatabase: DBNameMSSQL}
 
 	rows := sqlmock.NewRows([]string{"id", "name"}).
 		AddRow(1, "Alice").
@@ -513,41 +513,69 @@ func TestMSSQL_GetRecords(t *testing.T) {
 	}
 }
 
-// --- Regression: hyphenated Azure SQL database names, and no USE prefix ---
+// --- Regression: USE prefix only when switching away from the current DB ---
 func TestMSSQL_GetTables(t *testing.T) {
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
-	if err != nil {
-		t.Fatalf("Error creating mock: %v", err)
-	}
-	defer db.Close()
-
-	pg := &MSSQL{Connection: db}
-
-	// A hyphenated database name (common for Azure resource names) must
-	// not break the query: it is no longer embedded in the SQL at all,
-	// since the connection is already scoped to the target database.
-	const hyphenatedDB = "sql-db"
-
-	rows := sqlmock.NewRows([]string{"name"}).
-		AddRow("users").
-		AddRow("orders")
-
-	mock.ExpectQuery("SELECT name FROM sys.tables").WillReturnRows(rows)
-
-	tables, err := pg.GetTables(hyphenatedDB)
-	if err != nil {
-		t.Fatalf("GetTables failed: %v", err)
-	}
-
-	expected := map[string][]string{
-		hyphenatedDB: {"users", "orders"},
-	}
-
-	if !reflect.DeepEqual(tables, expected) {
-		t.Fatalf("Expected %v, got %v", expected, tables)
+	// A hyphenated name (common for Azure resource names) must be
+	// bracket-quoted whenever it is embedded in SQL, and a "]" inside the
+	// name must be escaped.
+	testCases := []struct {
+		name            string
+		currentDatabase string
+		database        string
+		expectedQuery   string
+	}{
+		{
+			name:            "connection already scoped to the target database (Azure SQL)",
+			currentDatabase: "sql-db",
+			database:        "sql-db",
+			expectedQuery:   "SELECT name FROM sys.tables",
+		},
+		{
+			name:            "browsing another database on the same server (on-prem)",
+			currentDatabase: "master",
+			database:        "sql-db",
+			expectedQuery:   "USE [sql-db]; SELECT name FROM sys.tables",
+		},
+		{
+			name:            "closing bracket in database name is escaped",
+			currentDatabase: "master",
+			database:        "we]ird",
+			expectedQuery:   "USE [we]]ird]; SELECT name FROM sys.tables",
+		},
 	}
 
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Errorf("Unfulfilled expectations: %s", err)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+			if err != nil {
+				t.Fatalf("Error creating mock: %v", err)
+			}
+			defer db.Close()
+
+			pg := &MSSQL{Connection: db, currentDatabase: tc.currentDatabase}
+
+			rows := sqlmock.NewRows([]string{"name"}).
+				AddRow("users").
+				AddRow("orders")
+
+			mock.ExpectQuery(tc.expectedQuery).WillReturnRows(rows)
+
+			tables, err := pg.GetTables(tc.database)
+			if err != nil {
+				t.Fatalf("GetTables failed: %v", err)
+			}
+
+			expected := map[string][]string{
+				tc.database: {"users", "orders"},
+			}
+
+			if !reflect.DeepEqual(tables, expected) {
+				t.Fatalf("Expected %v, got %v", expected, tables)
+			}
+
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Errorf("Unfulfilled expectations: %s", err)
+			}
+		})
 	}
 }

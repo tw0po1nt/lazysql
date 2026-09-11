@@ -21,6 +21,9 @@ import (
 type MSSQL struct {
 	Connection *sql.DB
 	Provider   string
+	// currentDatabase is the database the connection is scoped to (from the
+	// connection string), captured at Connect time. See usePrefix.
+	currentDatabase string
 }
 
 // mssqlGUIDToUUID converts a 16-byte little-endian GUID from MSSQL
@@ -74,7 +77,28 @@ func (db *MSSQL) Connect(urlstr string) error {
 		return err
 	}
 
+	if err := db.Connection.QueryRow("SELECT DB_NAME()").Scan(&db.currentDatabase); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// usePrefix returns a `USE [database]; ` statement to prepend to a query
+// targeting the given database, or "" when the connection is already scoped
+// to it.
+//
+// On-prem SQL Server lets one connection browse every database on the server,
+// so the tree lists them all and each query must switch context explicitly.
+// Azure SQL Database rejects USE for any database other than the current one
+// (error 40508), so the prefix is omitted whenever it would be a no-op — which
+// covers the common Azure setup of a connection string scoped to one database.
+func (db *MSSQL) usePrefix(database string) string {
+	if database == "" || database == db.currentDatabase {
+		return ""
+	}
+
+	return fmt.Sprintf("USE [%s]; ", strings.ReplaceAll(database, "]", "]]"))
 }
 
 func (db *MSSQL) GetDatabases() ([]string, error) {
@@ -116,10 +140,9 @@ func (db *MSSQL) GetTables(database string) (map[string][]string, error) {
 
 	tables := make(map[string][]string)
 
-	// The connection is already scoped to a single database, so query
-	// sys.tables unqualified rather than building a 3-part name (which
-	// also avoids having to bracket-quote the database identifier).
-	query := "SELECT name FROM sys.tables"
+	// Switch context via usePrefix rather than building a 3-part name, so
+	// the database identifier is bracket-quoted in exactly one place.
+	query := db.usePrefix(database) + "SELECT name FROM sys.tables"
 
 	rows, err := db.Connection.Query(query)
 	if err != nil {
@@ -145,7 +168,7 @@ func (db *MSSQL) GetTables(database string) (map[string][]string, error) {
 }
 
 func (db *MSSQL) GetTableColumns(database, table string) ([][]string, error) {
-	query := `
+	query := db.usePrefix(database) + `
         SELECT
             c.name AS column_name,
             t.name AS data_type,
@@ -165,13 +188,13 @@ func (db *MSSQL) GetTableColumns(database, table string) ([][]string, error) {
 	return db.getTableInformation(query, database, table, "")
 }
 
-func (db *MSSQL) GetConstraints(_, table string) ([][]string, error) {
+func (db *MSSQL) GetConstraints(database, table string) ([][]string, error) {
 	currentSchema, err := db.getCurrentSchema()
 	if err != nil {
 		return nil, err
 	}
 
-	query := `
+	query := db.usePrefix(database) + `
         SELECT
             kc.name AS constraint_name,
             c.name AS column_name,
@@ -195,7 +218,7 @@ func (db *MSSQL) GetConstraints(_, table string) ([][]string, error) {
 }
 
 func (db *MSSQL) GetForeignKeys(database, table string) ([][]string, error) {
-	query := `
+	query := db.usePrefix(database) + `
         SELECT
             fk.name AS constraint_name,
             c.name AS column_name,
@@ -230,7 +253,7 @@ func (db *MSSQL) GetIndexes(database, table string) ([][]string, error) {
 		return nil, err
 	}
 
-	query := `
+	query := db.usePrefix(database) + `
         SELECT
             t.name AS table_name,
             i.name AS index_name,
@@ -278,7 +301,7 @@ func (db *MSSQL) GetRecords(database, table, where, sort string, offset, limit i
 
 	results = make([][]string, 0)
 
-	baseQuery := "SELECT * FROM "
+	baseQuery := db.usePrefix(database) + "SELECT * FROM "
 	baseQuery += db.FormatReference(table)
 
 	if where != "" {
@@ -379,7 +402,7 @@ func (db *MSSQL) GetRecords(database, table, where, sort string, offset, limit i
 		return nil, 0, displayQueryString, err
 	}
 
-	countQuery := "SELECT COUNT(*) FROM "
+	countQuery := db.usePrefix(database) + "SELECT COUNT(*) FROM "
 	countQuery += db.FormatReference(table)
 
 	if where != "" {
@@ -419,7 +442,7 @@ func (db *MSSQL) UpdateRecord(database, table, column, value, primaryKeyColumnNa
 		return errors.New("primary key value is required")
 	}
 
-	query := "UPDATE "
+	query := db.usePrefix(database) + "UPDATE "
 	query += table
 	query += " SET "
 	query += column
@@ -448,7 +471,7 @@ func (db *MSSQL) DeleteRecord(database, table, primaryKeyColumnName, primaryKeyV
 		return errors.New("primary key value is required")
 	}
 
-	query := "DELETE FROM "
+	query := db.usePrefix(database) + "DELETE FROM "
 	query += table
 	query += " WHERE "
 	query += primaryKeyColumnName
@@ -561,7 +584,7 @@ func (db *MSSQL) GetPrimaryKeyColumnNames(database, table string) ([]string, err
 	}
 
 	pkColumnName := make([]string, 0)
-	query := `
+	query := db.usePrefix(database) + `
 		SELECT
 			c.name AS column_name
 		FROM
@@ -805,7 +828,7 @@ func (db *MSSQL) GetFunctions(database string) (map[string][]string, error) {
 
 	functions := make(map[string][]string)
 
-	query := `
+	query := db.usePrefix(database) + `
 		SELECT o.name
 		FROM sys.sql_modules m
 		JOIN sys.objects o ON m.object_id = o.object_id
@@ -842,7 +865,7 @@ func (db *MSSQL) GetProcedures(database string) (map[string][]string, error) {
 
 	procedures := make(map[string][]string)
 
-	query := `
+	query := db.usePrefix(database) + `
 		SELECT o.name
 		FROM sys.sql_modules m
 		JOIN sys.objects o ON m.object_id = o.object_id
@@ -887,7 +910,7 @@ func (db *MSSQL) GetViews(database string) (map[string][]string, error) {
 
 	views := make(map[string][]string)
 
-	query := `
+	query := db.usePrefix(database) + `
 		SELECT o.name
 		FROM sys.sql_modules m
 		JOIN sys.objects o ON m.object_id = o.object_id
@@ -924,7 +947,7 @@ func (db *MSSQL) GetObjectDefinition(database string, name string) (string, erro
 
 	result := ""
 
-	query := `
+	query := db.usePrefix(database) + `
 	declare @proc_source nvarchar(max);
     select @proc_source = object_definition(object_id(@name));
 
