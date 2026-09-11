@@ -116,9 +116,10 @@ func (db *MSSQL) GetTables(database string) (map[string][]string, error) {
 
 	tables := make(map[string][]string)
 
-	query := "SELECT name FROM "
-	query += database
-	query += ".sys.tables"
+	// The connection is already scoped to a single database, so query
+	// sys.tables unqualified rather than building a 3-part name (which
+	// also avoids having to bracket-quote the database identifier).
+	query := "SELECT name FROM sys.tables"
 
 	rows, err := db.Connection.Query(query)
 	if err != nil {
@@ -144,8 +145,7 @@ func (db *MSSQL) GetTables(database string) (map[string][]string, error) {
 }
 
 func (db *MSSQL) GetTableColumns(database, table string) ([][]string, error) {
-	query := fmt.Sprintf(`
-		USE %s;
+	query := `
         SELECT
             c.name AS column_name,
             t.name AS data_type,
@@ -161,7 +161,7 @@ func (db *MSSQL) GetTableColumns(database, table string) ([][]string, error) {
         WHERE c.object_id = OBJECT_ID(@p2)
         AND t.name <> 'sysname'
         ORDER BY c.column_id;
-    `, database)
+    `
 	return db.getTableInformation(query, database, table, "")
 }
 
@@ -171,8 +171,7 @@ func (db *MSSQL) GetConstraints(database, table string) ([][]string, error) {
 		return nil, err
 	}
 
-	query := fmt.Sprintf(`
-		USE %s;
+	query := `
         SELECT
             kc.name AS constraint_name,
             c.name AS column_name,
@@ -191,13 +190,12 @@ func (db *MSSQL) GetConstraints(database, table string) ([][]string, error) {
         WHERE s.name = @p1
           AND t.name = @p2
           AND kc.type IN ('PK', 'UQ')  -- Primary keys and unique constraints
-    `, database)
+    `
 	return db.getTableInformation(query, currentSchema, table, "")
 }
 
 func (db *MSSQL) GetForeignKeys(database, table string) ([][]string, error) {
-	query := fmt.Sprintf(`
-		USE %s;
+	query := `
         SELECT
             fk.name AS constraint_name,
             c.name AS column_name,
@@ -222,7 +220,7 @@ func (db *MSSQL) GetForeignKeys(database, table string) ([][]string, error) {
             ON t.schema_id = s.schema_id
         WHERE t.name = @p2
           AND DB_NAME(DB_ID(@p1)) = @p1
-    `, database)
+    `
 	return db.getTableInformation(query, database, table, "")
 }
 
@@ -232,8 +230,7 @@ func (db *MSSQL) GetIndexes(database, table string) ([][]string, error) {
 		return nil, err
 	}
 
-	query := fmt.Sprintf(`
-		USE %s;
+	query := `
         SELECT
             t.name AS table_name,
             i.name AS index_name,
@@ -262,7 +259,7 @@ func (db *MSSQL) GetIndexes(database, table string) ([][]string, error) {
           AND s.name = @p3
           AND DB_ID(@p1) = d.database_id
         ORDER BY i.type_desc
-    `, database)
+    `
 	return db.getTableInformation(query, database, table, currentSchema)
 }
 
@@ -281,7 +278,7 @@ func (db *MSSQL) GetRecords(database, table, where, sort string, offset, limit i
 
 	results = make([][]string, 0)
 
-	baseQuery := fmt.Sprintf("USE %s; SELECT * FROM ", database)
+	baseQuery := "SELECT * FROM "
 	baseQuery += db.FormatReference(table)
 
 	if where != "" {
@@ -382,10 +379,7 @@ func (db *MSSQL) GetRecords(database, table, where, sort string, offset, limit i
 		return nil, 0, displayQueryString, err
 	}
 
-	countQuery := "USE "
-	countQuery += database
-	countQuery += "; "
-	countQuery += "SELECT COUNT(*) FROM "
+	countQuery := "SELECT COUNT(*) FROM "
 	countQuery += db.FormatReference(table)
 
 	if where != "" {
@@ -425,10 +419,7 @@ func (db *MSSQL) UpdateRecord(database, table, column, value, primaryKeyColumnNa
 		return errors.New("primary key value is required")
 	}
 
-	query := "USE "
-	query += database
-	query += "; UPDATE "
-	query += database
+	query := "UPDATE "
 	query += table
 	query += " SET "
 	query += column
@@ -457,9 +448,7 @@ func (db *MSSQL) DeleteRecord(database, table, primaryKeyColumnName, primaryKeyV
 		return errors.New("primary key value is required")
 	}
 
-	query := "USE "
-	query += database
-	query += "; DELETE FROM "
+	query := "DELETE FROM "
 	query += table
 	query += " WHERE "
 	query += primaryKeyColumnName
@@ -572,10 +561,7 @@ func (db *MSSQL) GetPrimaryKeyColumnNames(database, table string) ([]string, err
 	}
 
 	pkColumnName := make([]string, 0)
-	query := "USE "
-	query += database
-	query += "; "
-	query += `
+	query := `
 		SELECT
 			c.name AS column_name
 		FROM
@@ -819,10 +805,7 @@ func (db *MSSQL) GetFunctions(database string) (map[string][]string, error) {
 
 	functions := make(map[string][]string)
 
-	query := "USE "
-	query += database
-	query += ";"
-	query += `
+	query := `
 		SELECT o.name
 		FROM sys.sql_modules m
 		JOIN sys.objects o ON m.object_id = o.object_id
@@ -859,10 +842,7 @@ func (db *MSSQL) GetProcedures(database string) (map[string][]string, error) {
 
 	procedures := make(map[string][]string)
 
-	query := "USE "
-	query += database
-	query += "; "
-	query += `
+	query := `
 		SELECT o.name
 		FROM sys.sql_modules m
 		JOIN sys.objects o ON m.object_id = o.object_id
@@ -907,10 +887,7 @@ func (db *MSSQL) GetViews(database string) (map[string][]string, error) {
 
 	views := make(map[string][]string)
 
-	query := "USE "
-	query += database
-	query += "; "
-	query += `
+	query := `
 		SELECT o.name
 		FROM sys.sql_modules m
 		JOIN sys.objects o ON m.object_id = o.object_id
@@ -947,10 +924,7 @@ func (db *MSSQL) GetObjectDefinition(database string, name string) (string, erro
 
 	result := ""
 
-	query := "USE "
-	query += database
-	query += "; "
-	query += `
+	query := `
 	declare @proc_source nvarchar(max);
     select @proc_source = object_definition(object_id(@name));
 

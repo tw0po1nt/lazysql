@@ -75,8 +75,9 @@ func TestMSSQL_GetPrimaryKeyColumnNames(t *testing.T) {
 
 	mock.ExpectQuery("SELECT SCHEMA_NAME() AS CurrentSchema").WillReturnRows(schemaRow)
 
-	// Match exact query structure with schema and USE prefix
-	mock.ExpectQuery(`USE test_db; SELECT
+	// Match exact query structure with schema (no USE prefix — the
+	// connection is already scoped to the target database)
+	mock.ExpectQuery(`SELECT
 			c.name AS column_name
 		FROM
 			sys.tables t
@@ -147,7 +148,7 @@ func TestMSSQL_GetForeignKeys(t *testing.T) {
 	)
 
 	mock.ExpectQuery(`
-        USE test_db; SELECT 
+        SELECT
             fk.name AS constraint_name,
             c.name AS column_name,
             DB_NAME(DB_ID(@p1)) AS current_database,
@@ -294,7 +295,7 @@ func TestMSSQL_GetIndexes(t *testing.T) {
 	mock.ExpectQuery("SELECT SCHEMA_NAME() AS CurrentSchema").WillReturnRows(schemaRow)
 
 	mock.ExpectQuery(`
-        USE test_db; SELECT
+        SELECT
             t.name AS table_name,
             i.name AS index_name,
             CAST(i.is_unique AS BIT) AS is_unique,
@@ -427,7 +428,7 @@ func TestMSSQL_GetTableColumns(t *testing.T) {
 		"", // Empty comment
 	)
 
-	mock.ExpectQuery(`USE test_db;
+	mock.ExpectQuery(`
         SELECT
             c.name AS column_name,
             t.name AS data_type,
@@ -505,6 +506,45 @@ func TestMSSQL_GetRecords(t *testing.T) {
 
 	if total != 2 {
 		t.Fatalf("Expected total 2, got %d", total)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %s", err)
+	}
+}
+
+// --- Regression: hyphenated Azure SQL database names, and no USE prefix ---
+func TestMSSQL_GetTables(t *testing.T) {
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatalf("Error creating mock: %v", err)
+	}
+	defer db.Close()
+
+	pg := &MSSQL{Connection: db}
+
+	// A hyphenated database name (common for Azure resource names) must
+	// not break the query: it is no longer embedded in the SQL at all,
+	// since the connection is already scoped to the target database.
+	const hyphenatedDB = "sql-db"
+
+	rows := sqlmock.NewRows([]string{"name"}).
+		AddRow("users").
+		AddRow("orders")
+
+	mock.ExpectQuery("SELECT name FROM sys.tables").WillReturnRows(rows)
+
+	tables, err := pg.GetTables(hyphenatedDB)
+	if err != nil {
+		t.Fatalf("GetTables failed: %v", err)
+	}
+
+	expected := map[string][]string{
+		hyphenatedDB: {"users", "orders"},
+	}
+
+	if !reflect.DeepEqual(tables, expected) {
+		t.Fatalf("Expected %v, got %v", expected, tables)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
