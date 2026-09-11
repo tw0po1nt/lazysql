@@ -165,7 +165,7 @@ func (db *MSSQL) GetTableColumns(database, table string) ([][]string, error) {
 	return db.getTableInformation(query, database, table, "")
 }
 
-func (db *MSSQL) GetConstraints(database, table string) ([][]string, error) {
+func (db *MSSQL) GetConstraints(_, table string) ([][]string, error) {
 	currentSchema, err := db.getCurrentSchema()
 	if err != nil {
 		return nil, err
